@@ -21,6 +21,7 @@
 #include "mlir/IR/TypeUtilities.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
+#include "mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h"
 #include <cassert>
 #include <cstdint>
 
@@ -204,6 +205,60 @@ Value createSubgroupShuffleReduction(OpBuilder &builder, Location loc,
   }
 
   return laneVal;
+}
+
+/// Emits a subgroup reduction using a sequence of DPP operations.
+/// Use the `packFn` and `unpackFn` to convert to the native shuffle type and
+/// to the reduction type, respectively. For example, with `input` of type
+/// `f16`, `packFn` could build ops to cast the value to `i32` to perform
+/// shuffles, while `unpackFn` would cast it back to `f16` to perform
+/// arithmetic reduction on. Assumes that the subgroup is `subgroupSize` lanes
+/// wide and divides it into clusters of `clusterSize` lanes starting at lane 0
+///  with a stride of `clusterStride` for lanes within a cluster, reducing all
+/// lanes in each cluster in parallel.
+Value createSubgroupDPPReduction(OpBuilder &builder, Location loc,
+  Value input, gpu::AllReduceOperation mode,
+  const ClusterInfo &ci,
+  function_ref<Value(Value)> packFn,
+  function_ref<Value(Value)> unpackFn) {
+
+  Value result = input;
+  if (ci.clusterSize >= 2) {
+    auto permArg = builder.getInt32(1);
+    result = builder.create<amdgpu::DPPOp>(result, input, amdgpu::DPPPerm::row_shl, permArg);
+  }
+
+  if (ci.clusterSize >= 4) {
+    auto permArg = builder.getInt32(2);
+    result = builder.create<amdgpu::DPPOp>(result, input, amdgpu::DPPPerm::row_shl, permArg);
+  }
+
+  if (ci.clusterSize >= 8) {
+    result = builder.create<amdgpu::DPPOp>(result, input, amdgpu::DPPPerm::row_half_mirror);
+  }
+
+  if (ci.clusterSize >= 16) {
+    result = builder.create<amdgpu::DPPOp>(result, input, amdgpu::DPPPerm::row_mirror);
+  }
+
+  if (ci.clusterSize >= 32) {
+    auto permArg = builder.getInt32(15);
+    auto rowMask = builder.getInt32("0xa");
+    auto bankMask = builder.getInt32("0xf");
+    auto boundCtrl = builder.getBoolAttr(false);
+    result = builder.create<amdgpu::DPPOp>(result, result, amdgpu::DPPPerm::row_bcast, permArg, rowMask, bankMask, boundCtrl);
+  }
+
+  if (ci.clusterSize == 64) {
+    auto permArg = builder.getInt32(31);
+    auto rowMask = builder.getInt32("0xc");
+    auto bankMask = builder.getInt32("0xf");
+    auto boundCtrl = builder.getBoolAttr(false);
+    result = builder.create<amdgpu::DPPOp>(result, input, amdgpu::DPPPerm::row_bcast, permArg, rowMask, bankMask, boundCtrl);
+  }
+
+  assert(laneVal.getType() == input.getType());
+  return result;
 }
 
 /// Lowers scalar gpu subgroup reductions to a series of shuffles.
