@@ -506,6 +506,39 @@ LogicalResult GatherToLDSOp::verify() {
   return success();
 }
 
+LogicalResult ScaledMFMAOp::verify() {
+  unsigned opselA = getOpselA();
+  unsigned opselB = getOpselB();
+
+  opselA >>= 8;
+  opselB >>= 8;
+
+  if (opselA != 0)
+    return emitOpError("Opsel A must be a zero extended 8 bit value.");
+
+  if (opselB != 0)
+    return emitOpError("Opsel B must be a zero extended 8 bit value.");
+
+  auto valid = [&](Type mlirElemType){
+    return llvm::TypeSwitch<Type, bool>(mlirElemType)
+    .Case([](Float8E4M3FNType) { return true; })
+    .Case([](Float8E5M2Type) { return true; })
+    .Case([](Float6E2M3FNType) { return true; })
+    .Case([](Float6E3M2FNType) { return true; })
+    .Case([](Float4E2M1FNType) { return true; })
+    .Default([](Type) { return false; });
+  };
+  
+  Type aType = getSourceA().getType();
+  Type bType = getSourceB().getType();
+  if (!valid(aType))
+    return emitOpError("Source A must be of element type fp4, fp6 or fp8."); 
+  if (!valid(bType)) 
+    return emitOpError("Source B must be of element type fp4, fp6 or fp8.");
+  
+  return success();
+}
+
 #include "mlir/Dialect/AMDGPU/IR/AMDGPUEnums.cpp.inc"
 
 #define GET_ATTRDEF_CLASSES

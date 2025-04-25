@@ -803,12 +803,11 @@ mfmaOpToScaledIntrinsic(Type aType, Type bType, Type destType, uint32_t m,
   aType = getElementTypeOrSelf(aType);
   bType = getElementTypeOrSelf(bType);
   destType = getElementTypeOrSelf(destType);
-
   if (chipset < kGfx950)
     return std::nullopt;
   if (!isa<Float32Type>(destType))
     return std::nullopt;
-
+  
   std::optional<uint32_t> aTypeCode = mfmaTypeSelectCode(aType);
   std::optional<uint32_t> bTypeCode = mfmaTypeSelectCode(bType);
   if (!aTypeCode || !bTypeCode)
@@ -831,6 +830,14 @@ mfmaOpToScaledIntrinsic(MFMAOp mfma, Chipset chipset) {
       mfma.getSourceA().getType(), mfma.getSourceB().getType(),
       mfma.getDestC().getType(), mfma.getM(), mfma.getN(), mfma.getK(),
       mfma.getBlocks(), chipset);
+}
+
+static std::optional<std::tuple<StringRef, uint32_t, uint32_t>>
+mfmaOpToScaledIntrinsic(ScaledMFMAOp smfma, Chipset chipset) {
+  return mfmaOpToScaledIntrinsic(smfma.getSourceA().getType(),
+                                 smfma.getSourceB().getType(),
+                                 smfma.getDestC().getType(), smfma.getM(),
+                                 smfma.getN(), smfma.getK(), 1u, chipset);
 }
 
 /// Return the `rocdl` intrinsic corresponding to a WMMA operation `wmma`
@@ -946,6 +953,54 @@ struct MFMAOpLowering : public ConvertOpToLLVMPattern<MFMAOp> {
                              createI32Constant(rewriter, loc, op.getAbid()),
                              createI32Constant(rewriter, loc, getBlgpField)});
     };
+    Value lowered = rewriter.create(loweredOp)->getResult(0);
+    if (outType != intrinsicOutType)
+      lowered = rewriter.create<LLVM::BitcastOp>(loc, outType, lowered);
+    rewriter.replaceOp(op, lowered);
+    return success();
+  }
+};
+
+struct ScaledMFMAOpLowering : public ConvertOpToLLVMPattern<ScaledMFMAOp> {
+  ScaledMFMAOpLowering(const LLVMTypeConverter &converter, Chipset chipset)
+      : ConvertOpToLLVMPattern<ScaledMFMAOp>(converter), chipset(chipset) {}
+
+  Chipset chipset;
+
+  LogicalResult
+  matchAndRewrite(ScaledMFMAOp op, ScaledMFMAOpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
+    Type outType = typeConverter->convertType(op.getDestD().getType());
+    Type intrinsicOutType = outType;
+    if (auto outVecType = dyn_cast<VectorType>(outType))
+      if (outVecType.getElementType().isBF16())
+        intrinsicOutType = outVecType.clone(rewriter.getI16Type());
+
+    if (chipset.majorVersion != 9 || chipset < kGfx908)
+      return op->emitOpError("Scaled MFMA only supported on gfx908+");
+    std::optional<std::tuple<StringRef, uint32_t, uint32_t>>
+        maybeScaledIntrinsic = mfmaOpToScaledIntrinsic(op, chipset);
+    if (!maybeScaledIntrinsic.has_value())
+      return op.emitOpError(
+          "no intrinsic matching Scaled MFMA size on given chipset");
+
+    StringRef intrinsicName = std::get<0>(*maybeScaledIntrinsic);
+    OperationState loweredOp(loc, intrinsicName);
+    loweredOp.addTypes(intrinsicOutType);
+    loweredOp.addOperands(
+        {convertMFMAVectorOperand(rewriter, loc, adaptor.getSourceA()),
+         convertMFMAVectorOperand(rewriter, loc, adaptor.getSourceB()),
+         adaptor.getDestC()});
+    Value scaleA = createI32Constant(rewriter, loc, adaptor.getScaleA());
+    Value scaleB = createI32Constant(rewriter, loc, adaptor.getScaleB());
+    Value opselA = createI32Constant(rewriter, loc, adaptor.getOpselA());
+    Value opselB = createI32Constant(rewriter, loc, adaptor.getOpselB());
+    auto [_scaledName, aTypeCode, bTypeCode] = *maybeScaledIntrinsic;
+    loweredOp.addOperands({createI32Constant(rewriter, loc, aTypeCode),
+                           createI32Constant(rewriter, loc, bTypeCode),
+                           /*scale A byte=*/opselA, /*scale A=*/scaleA,
+                           /*scale B byte=*/opselB, /*scale B=*/scaleB});
     Value lowered = rewriter.create(loweredOp)->getResult(0);
     if (outType != intrinsicOutType)
       lowered = rewriter.create<LLVM::BitcastOp>(loc, outType, lowered);
@@ -1474,8 +1529,9 @@ void mlir::populateAMDGPUToROCDLConversionPatterns(LLVMTypeConverter &converter,
            RawBufferOpLowering<RawBufferAtomicCmpswapOp,
                                ROCDL::RawPtrBufferAtomicCmpSwap>,
            AMDGPUDPPLowering, LDSBarrierOpLowering, SchedBarrierOpLowering,
-           MFMAOpLowering, WMMAOpLowering, ExtPackedFp8OpLowering,
-           PackedTrunc2xFp8OpLowering, PackedStochRoundFp8OpLowering,
-           GatherToLDSOpLowering>(converter, chipset);
+           MFMAOpLowering, ScaledMFMAOpLowering, WMMAOpLowering,
+           ExtPackedFp8OpLowering, PackedTrunc2xFp8OpLowering,
+           PackedStochRoundFp8OpLowering, GatherToLDSOpLowering>(converter,
+                                                                 chipset);
   patterns.add<AMDGPUSwizzleBitModeLowering>(converter);
 }
