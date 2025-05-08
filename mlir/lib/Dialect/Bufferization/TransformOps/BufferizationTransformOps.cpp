@@ -58,6 +58,7 @@ DiagnosedSilenceableFailure
 transform::OneShotBufferizeOp::apply(transform::TransformRewriter &rewriter,
                                      TransformResults &transformResults,
                                      TransformState &state) {
+  llvm::errs() << "acac 3\n";
   OneShotBufferizationOptions options;
   options.allowReturnAllocsFromLoops = getAllowReturnAllocsFromLoops();
   options.allowUnknownOps = getAllowUnknownOps();

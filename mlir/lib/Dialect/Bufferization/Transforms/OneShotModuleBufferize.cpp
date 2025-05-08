@@ -507,6 +507,7 @@ void mlir::bufferization::removeBufferizationAttributesInModule(
 LogicalResult mlir::bufferization::bufferizeModuleOp(
     ModuleOp moduleOp, const OneShotBufferizationOptions &options,
     BufferizationStatistics *statistics) {
+  llvm::errs() << "ababab 2\n";
   assert(options.bufferizeFunctionBoundaries &&
          "expected that function boundary bufferization is activated");
   IRRewriter rewriter(moduleOp.getContext());

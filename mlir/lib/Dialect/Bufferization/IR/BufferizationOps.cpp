@@ -150,6 +150,7 @@ void mlir::bufferization::populateDynamicDimSizes(
 
 LogicalResult AllocTensorOp::bufferize(RewriterBase &rewriter,
                                        const BufferizationOptions &options) {
+  llvm::errs() << "[DEBUG][Bufferization] ???? \n";
   OpBuilder::InsertionGuard g(rewriter);
   Location loc = getLoc();
 
@@ -158,7 +159,7 @@ LogicalResult AllocTensorOp::bufferize(RewriterBase &rewriter,
     rewriter.eraseOp(getOperation());
     return success();
   }
-
+  llvm::errs() << "[DEBUG][Bufferization] ????0 \n";
   // Get "copy" buffer.
   Value copyBuffer;
   if (getCopy()) {
@@ -167,7 +168,7 @@ LogicalResult AllocTensorOp::bufferize(RewriterBase &rewriter,
       return failure();
     copyBuffer = *maybeCopyBuffer;
   }
-
+  llvm::errs() << "[DEBUG][Bufferization] ????2 \n";
   // Create memory allocation.
   auto allocType = bufferization::getBufferType(getResult(), options);
   if (failed(allocType))
@@ -177,10 +178,12 @@ LogicalResult AllocTensorOp::bufferize(RewriterBase &rewriter,
     assert(dynamicDims.empty() && "expected either `copy` or `dynamicDims`");
     populateDynamicDimSizes(rewriter, loc, copyBuffer, dynamicDims);
   }
+  llvm::errs() << "[DEBUG][Bufferization] ????3 \n";
   FailureOr<Value> alloc = options.createAlloc(
       rewriter, loc, llvm::cast<MemRefType>(*allocType), dynamicDims);
   if (failed(alloc))
     return failure();
+  llvm::errs() << "[DEBUG][Bufferization] ????4 \n";
 
   // Create memory copy (if any).
   if (getCopy()) {

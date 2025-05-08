@@ -58,6 +58,7 @@ struct OneShotBufferizePass
   using Base::Base;
 
   void runOnOperation() override {
+    llvm::errs() << "acac 4\n";
     OneShotBufferizationOptions opt;
     if (!options) {
       // Make new bufferization options if none were provided when creating the

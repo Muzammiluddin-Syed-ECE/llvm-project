@@ -1369,6 +1369,7 @@ LogicalResult
 bufferization::runOneShotBufferize(Operation *op,
                                    const OneShotBufferizationOptions &options,
                                    BufferizationStatistics *statistics) {
+  llvm::errs() << "ababab 1\n";
   // copy-before-write deactivates the analysis. It cannot be used together with
   // test-analysis-only.
   assert(!(options.copyBeforeWrite && options.testAnalysisOnly) &&
