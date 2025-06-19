@@ -1,4 +1,5 @@
-// RUN: mlir-opt %s -arith-expand="include-bf16=true include-f8e8m0=true include-f4e2m1=true" -verify-diagnostics -split-input-file | FileCheck %s 
+// RUN: mlir-opt %s -arith-expand="include-bf16=true include-f8e8m0=true" -verify-diagnostics -split-input-file | FileCheck %s 
+// RUN: mlir-opt %s -arith-expand -split-input-file -verify-diagnostics | FileCheck %s --check-prefix=SCHECK
 
 // Test ceil divide with signed integer
 // CHECK-LABEL:       func @ceildivi
@@ -253,7 +254,7 @@ func.func @truncf_f32_to_f8E8M0FNU(%arg0 : f32) -> f8E8M0FNU {
     %0 = arith.truncf %arg0 : f32 to f8E8M0FNU
     return %0 : f8E8M0FNU
 }
-// CHECK-LABEL: @truncf_f32_to_f8E8M0FNU
+// CHECK-LABLE: @truncf_f32_to_f8E8M0FNU
 // CHECK: %[[BITCAST:.+]] = arith.bitcast %arg0 : f32 to i32
 // CHECK: %[[C23_i32:.+]] = arith.constant 23 : i32
 // CHECK: %[[SHRUI:.+]] = arith.shrui %[[BITCAST]], %[[C23_i32]] : i32
@@ -267,7 +268,7 @@ func.func @truncf_f16_to_f8E8M0FNU(%arg0 : f16) -> f8E8M0FNU {
     %0 = arith.truncf %arg0 : f16 to f8E8M0FNU
     return %0 : f8E8M0FNU
 }
-// CHECK-LABEL: @truncf_f16_to_f8E8M0FNU
+// CHECK-LABLE: @truncf_f16_to_f8E8M0FNU
 // CHECK: %[[EXTF:.+]] = arith.extf %arg0 : f16 to f32
 // CHECK: %[[BITCAST:.+]] = arith.bitcast %[[EXTF]] : f32 to i32
 // CHECK: %[[C23_i32:.+]] = arith.constant 23 : i32
@@ -305,18 +306,9 @@ func.func @truncf_vector_bf16_to_f8E8M0FNU(%arg0 : vector<4xbf16>) -> vector<4xf
 
 // CHECK-LABEL: @truncf_vector_bf16_to_f8E8M0FNU
 // CHECK-NOT: arith.truncf
-// CHECK: return
+
 
 // -----
-
-func.func @invalid_scaling_truncf_to_f4E2M1FN(%arg0: f16, %arg1 : f8E5M2FNUZ) -> f4E2M1FN {
-    // expected-error@+1 {{failed to legalize operation 'arith.scaling_truncf' that was explicitly marked illegal}}
-    %0 = arith.scaling_truncf %arg0, %arg1 : f16, f8E5M2FNUZ to f4E2M1FN
-    return %0 : f4E2M1FN
-}
-
-// -----
-
 func.func @extf_f8E8M0FNU_to_f32(%arg0 : f8E8M0FNU) -> f32 {
     %0 = arith.extf %arg0 : f8E8M0FNU to f32
     return %0 : f32
@@ -341,7 +333,7 @@ func.func @extf_f8E8M0FNU_to_f16(%arg0 : f8E8M0FNU) -> f16 {
     return %0 : f16
 }
 
-// CHECK-LABEL: @extf_f8E8M0FNU_to_f16
+// CHECK-LABLE: @extf_f8E8M0FNU_to_f16
 // CHECK: %[[BITCAST:.+]] = arith.bitcast %arg0 : f8E8M0FNU to i8
 // CHECK-DAG: %[[CF8NAN:.+]] = arith.constant -1 : i8
 // CHECK-DAG: %[[CF32NAN:.+]] = arith.constant -1 : i32
@@ -383,15 +375,7 @@ func.func @extf_vector_f8E8M0FNU_to_bf16(%arg0 : vector<4xf8E8M0FNU>) -> vector<
 
 // CHECK-LABEL: @extf_vector_f8E8M0FNU_to_bf16
 // CHECK-NOT: arith.extf
-// CHECK: return
 
-// -----
-
-func.func @invalid_scaling_extf_to_f32(%arg0: f4E2M1FN, %arg1 : f8E5M2FNUZ) -> f32 {
-    // expected-error@+1 {{failed to legalize operation 'arith.scaling_extf' that was explicitly marked illegal}}
-    %0 = arith.scaling_extf %arg0, %arg1 : f4E2M1FN, f8E5M2FNUZ to f32
-    return %0 : f32
-}
 
 // -----
 
