@@ -341,7 +341,7 @@ static bool isPairTemplateImpl(Operation *add, Operation *mul) {
 /// operations given pairwise by template arguments.
 template <typename... Args>
 static bool isContractionBody(Block &block) {
-  return linalg::detail::isContractionBody(block, &isPairTemplateImpl<Args...>);
+  return linalg::detail::isContractionBody(block, &isPairTemplateImpl<Args...>, llvm::errs());
 }
 
 /// Given an `indexingMap` and its corresponding `iterators`, returns
@@ -552,6 +552,237 @@ LogicalResult mlir::linalg::detail::verifyContractionInterface(Operation *op) {
   if (res != MatchContractionResult::Success)
     return op->emitError(getMatchContractionMessage(res));
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// ScaledContractionOpInterface implementation
+//===----------------------------------------------------------------------===//
+
+bool mlir::linalg::detail::isScaledContractionBody(
+    Block &block, function_ref<bool(Operation *, Operation *)> isaPair,
+    llvm::raw_ostream &errs) {
+  if (block.empty() || !block.back().mightHaveTrait<OpTrait::IsTerminator>()) {
+    errs << "no terminator in the block";
+    return false;
+  }
+  errs << "\n" << block.getNumArguments() << "\n";
+  if (block.getNumArguments() != 5) {
+    errs << "expected block with 3 arguments";
+    return false;
+  }
+
+  Operation *terminator = block.getTerminator();
+  if (terminator->getNumOperands() != 1) {
+    errs << "expected terminator with 1 operand";
+    return false;
+  }
+
+  // Skip cast-like ops and ops with no memory effects
+  auto getSourceSkipIrrelevant = [](Value value) -> Value {
+    Operation *op = value.getDefiningOp();
+    while (op) {
+      if ((op->getNumOperands() == 1) ||
+          !isa<arith::ExtFOp, arith::TruncFOp, arith::ScalingExtFOp,
+              arith::ScalingTruncFOp>(op)) {
+        break;
+      }
+      auto iface = dyn_cast<MemoryEffectOpInterface>(op);
+      if (!iface || !iface.hasNoEffect()) {
+        llvm::errs() << "[DEBUG] - WOOPS\n";
+        break;
+      }
+      value = op->getOperand(0);
+      llvm::errs() << "W?\n";
+      op = value.getDefiningOp();
+    }
+    return value;
+  };
+  Value yielded = getSourceSkipUnary(terminator->getOperand(0));
+  Operation *reductionOp = yielded.getDefiningOp();
+  if (reductionOp->getNumResults() != 1 || reductionOp->getNumOperands() != 2) {
+    errs << "expected reduction op to be binary";
+    return false;
+  }
+
+  Value reductionLHS = getSourceSkipUnary(reductionOp->getOperand(0));
+  Value reductionRHS = getSourceSkipUnary(reductionOp->getOperand(1));
+
+  if (reductionLHS != block.getArgument(4) &&
+      reductionRHS != block.getArgument(4)) {
+    errs << "expected reduction to take block argument #4 as one of the "
+            "operands (modulo unary casts)";
+    return false;
+  }
+
+  Value contributed = getSourceSkipUnary(
+      isa<BlockArgument>(reductionLHS) ? reductionRHS : reductionLHS);
+  Operation *elementwiseOp = contributed.getDefiningOp();
+  if (!elementwiseOp || elementwiseOp->getNumResults() != 1 ||
+      elementwiseOp->getNumOperands() != 2) {
+    errs << "expected elementwise op to be binary";
+    return false;
+  }
+
+  if (!isaPair(elementwiseOp, reductionOp)) {
+    errs << "expected reduction/elementwise op kind not satisfied";
+    return false;
+  }
+
+  Value elementwiseLHS = getSourceSkipIrrelevant(elementwiseOp->getOperand(0));
+  Value elementwiseRHS = getSourceSkipIrrelevant(elementwiseOp->getOperand(1));
+  errs << "Block args:\n";
+  errs << "\t"<< block.getArgument(0) <<"\n";
+  errs << "\t"<< block.getArgument(1) <<"\n";
+  errs << "Eltwise:\n";
+  errs << "\t"<< elementwiseLHS <<"\n";
+  errs << "\t"<< elementwiseRHS <<"\n";
+  if ((elementwiseLHS == block.getArgument(0) &&
+       elementwiseRHS == block.getArgument(1)) ||
+      (elementwiseLHS == block.getArgument(1) &&
+       elementwiseRHS == block.getArgument(0))) {
+    return true;
+  }
+
+  errs << "expected elementwise op to apply to block arguments (modulo unary "
+          "casts)";
+  return false;
+}
+
+/// Returns true if the block is a body of a contraction with the kinds of
+/// operations given pairwise by template arguments.
+template <typename... Args>
+static bool isScaledContractionBody(Block &block) {
+  return linalg::detail::isScaledContractionBody(block, &isPairTemplateImpl<Args...>, llvm::errs());
+}
+
+/// Find 2 parallel (m and n) and 2 reduction (k and k_B) dimension candidates
+/// that form a scaled matmul subcomputation within `linalgOp`.
+/// These dimensions are such that:
+///   1. The m dimension is involved in an outer-product along LHS
+///      (i.e. it is a permutation on RES and LHS and does not appear in RHS).
+///   2. The n dimension is involved in an outer-product along RHS
+///      (i.e. it is a permutation on RES and RHS and does not appear in LHS).
+///   3. The k dimension appears as a permutation on LHS and RHS.
+///   4. The k_B dimension appears as a permutation on LHS and RHS in scales
+///   4. m, n, k, k_B appear only once in any given indexing.
+///   5. Optional batch dimensions that appear in all operands are captured.
+/// This allows e.g. detecting that some contraction is embedded within
+/// `linalgOp` with some orthogonal heuristic.
+static FailureOr<ScaledContractionDimensions>
+inferScaledContractionDimsImpl(ArrayRef<AffineMap> indexingMaps,
+                               ArrayRef<utils::IteratorType> iterators) {
+  llvm::SmallDenseSet<int64_t> a =
+      findPermutationsIndexingOperand(indexingMaps[0], iterators, par);
+  llvm::SmallDenseSet<int64_t> b =
+      findPermutationsIndexingOperand(indexingMaps[1], iterators, par);
+  llvm::SmallDenseSet<int64_t> c =
+      findPermutationsIndexingOperand(indexingMaps[4], iterators, par);
+
+  // A & C - B are the iterators involved in an outer-product along A (the LHS).
+  llvm::SmallDenseSet<int64_t> ac = a;
+  llvm::set_intersect(ac, c);
+  llvm::set_subtract(ac, b);
+  // B & C - A are the iterators involved in an outer-product along B (the RHS).
+  llvm::SmallDenseSet<int64_t> bc = b;
+  llvm::set_intersect(bc, c);
+  llvm::set_subtract(bc, a);
+  // A & B & C are the "batch" dimensions.
+  llvm::SmallDenseSet<int64_t> batches = a;
+  llvm::set_intersect(batches, b);
+  llvm::set_intersect(batches, c);
+
+  // Scale A & Scale B is k_b reduction dimension.
+  llvm::SmallDenseSet<int64_t> sa =
+      findPermutationsIndexingOperand(indexingMaps[2], iterators, red);
+  llvm::SmallDenseSet<int64_t> sb =
+      findPermutationsIndexingOperand(indexingMaps[3], iterators, red);
+  llvm::set_intersect(sa, sb);
+
+  // A red & B red - Scale A & Scale B is k reduction dimension.
+  llvm::SmallDenseSet<int64_t> ra =
+      findPermutationsIndexingOperand(indexingMaps[0], iterators, red);
+  llvm::SmallDenseSet<int64_t> rb =
+      findPermutationsIndexingOperand(indexingMaps[1], iterators, red);
+  llvm::set_intersect(ra, rb);
+  llvm::set_subtract(ra, sa);
+
+  // Return each set in sorted order.
+  ScaledContractionDimensions dimensions{
+      SmallVector<unsigned, 2>(batches.begin(), batches.end()),
+      SmallVector<unsigned, 2>(ac.begin(), ac.end()),
+      SmallVector<unsigned, 2>(bc.begin(), bc.end()),
+      SmallVector<unsigned, 2>(ra.begin(), ra.end()),
+      SmallVector<unsigned, 2>(sa.begin(), sa.end())};
+  llvm::sort(dimensions.batch.begin(), dimensions.batch.end());
+  llvm::sort(dimensions.m.begin(), dimensions.m.end());
+  llvm::sort(dimensions.n.begin(), dimensions.n.end());
+  llvm::sort(dimensions.k.begin(), dimensions.k.end());
+  llvm::sort(dimensions.kB.begin(), dimensions.kB.end());
+  return dimensions;
+}
+
+FailureOr<ScaledContractionDimensions>
+mlir::linalg::inferScaledContractionDims(ArrayRef<AffineMap> indexingMaps) {
+  if (indexingMaps.size() != 5)
+    return failure();
+  auto iterators = inferIteratorsFromOutMap(indexingMaps[4]);
+  if (failed(iterators))
+    return failure();
+  return inferScaledContractionDimsImpl(indexingMaps, iterators.value());
+}
+
+
+FailureOr<ScaledContractionDimensions>
+mlir::linalg::inferScaledContractionDims(LinalgOp linalgOp) {
+  if (linalgOp.getNumDpsInits() != 1 || linalgOp.getNumDpsInputs() != 4)
+    return failure();
+  return inferScaledContractionDimsImpl(linalgOp.getIndexingMapsArray(),
+                                        linalgOp.getIteratorTypesArray());
+}
+
+mlir::linalg::detail::MatchContractionResult
+mlir::linalg::detail::isScaledContractionImpl(
+    Operation *op, mlir::linalg::ScaledContractionDimensions *dimensions) {
+  auto linalgOp = dyn_cast<linalg::LinalgOp>(op);
+  llvm::errs() << "[DEBUG] - isScaledContractionImpl\n";
+  if (!linalgOp)
+    return MatchContractionResult::NotLinalgOp;
+  if (linalgOp.getNumDpsInputs() != 4 || linalgOp.getNumDpsInits() != 1)
+    return MatchContractionResult::WrongNumOperands;
+  auto mapRange = linalgOp.getIndexingMapsArray();
+  if (linalgOp.getNumReductionLoops() == 0)
+    return MatchContractionResult::NoReduction;
+  if (llvm::any_of(mapRange,
+                   [](AffineMap m) { return !m.isProjectedPermutation(); }))
+    return MatchContractionResult::NotProjectedPermutations;
+  llvm::errs() << "[DEBUG] - Made it through\n";
+  // TODO: more fields than add/mul.
+  // clang-format off
+  if (!::isScaledContractionBody<
+        arith::MulFOp, arith::AddFOp,
+        arith::MulIOp, arith::AddIOp,
+        complex::MulOp, complex::AddOp,
+        arith::AndIOp, arith::OrIOp>(
+      *linalgOp.getBlock())) {
+    return MatchContractionResult::NotAddMul;
+  }
+  // clang-format on
+  llvm::errs() << "[DEBUG] - dimensions?\n";
+  if (dimensions) {
+    FailureOr<ScaledContractionDimensions> res =
+        inferScaledContractionDims(linalgOp);
+    assert(succeeded(res) && "unexpected failure to infer contraction dims");
+    *dimensions = *res;
+  }
+  return MatchContractionResult::Success;
+}
+
+bool mlir::linalg::isaScaledContractionOpInterface(LinalgOp linalgOp) {
+  if (!linalgOp)
+    return false;
+  Operation *op = linalgOp.getOperation();
+  return mlir::linalg::detail::isScaledContractionImpl(op) ==
+         mlir::linalg::detail::MatchContractionResult::Success;
 }
 
 //===----------------------------------------------------------------------===//
