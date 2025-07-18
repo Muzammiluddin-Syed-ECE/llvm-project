@@ -663,7 +663,8 @@ void memref::populateMemRefNarrowTypeEmulationConversions(
         if (!newElemTy)
           return nullptr;
 
-        StridedLayoutAttr layoutAttr;
+        StridedLayoutAttr layoutAttr = StridedLayoutAttr::get(ty.getContext(), 0,
+                                                ArrayRef<int64_t>{1});
         // If the offset is 0, we do not need a strided layout as the stride is
         // 1, so we only use the strided layout if the offset is not 0.
         if (offset != 0) {
