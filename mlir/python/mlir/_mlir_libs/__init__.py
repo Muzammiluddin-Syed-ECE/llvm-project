@@ -242,7 +242,6 @@ def _site_initialize():
     Sequence.register(ir.BlockPredecessors)
     Sequence.register(ir.OperationList)
     Sequence.register(ir.OpOperandList)
-    Sequence.register(ir.OpOperands)
     Sequence.register(ir.OpResultList)
     Sequence.register(ir.OpSuccessors)
     Sequence.register(ir.RegionSequence)

@@ -8,12 +8,15 @@
 
 #include "Rewrite.h"
 
-#include "mlir-c/Bindings/Python/Interop.h"
 #include "mlir-c/IR.h"
 #include "mlir-c/Rewrite.h"
 #include "mlir-c/Support.h"
 #include "mlir/Bindings/Python/Globals.h"
 #include "mlir/Bindings/Python/IRCore.h"
+// clang-format off
+#include "mlir/Bindings/Python/Nanobind.h"
+#include "mlir-c/Bindings/Python/Interop.h" // This is expected after nanobind.
+// clang-format on
 #include "mlir/Config/mlir-config.h"
 #include "nanobind/nanobind.h"
 #include <type_traits>
@@ -27,12 +30,38 @@ namespace mlir {
 namespace python {
 namespace MLIR_BINDINGS_PYTHON_DOMAIN {
 
-class PyPatternRewriter : public PyRewriterBase<PyPatternRewriter> {
+class PyPatternRewriter {
 public:
-  static constexpr const char *pyClassName = "PatternRewriter";
-
   PyPatternRewriter(MlirPatternRewriter rewriter)
-      : PyRewriterBase(mlirPatternRewriterAsBase(rewriter)) {}
+      : base(mlirPatternRewriterAsBase(rewriter)),
+        ctx(PyMlirContext::forContext(mlirRewriterBaseGetContext(base))) {}
+
+  PyInsertionPoint getInsertionPoint() const {
+    MlirBlock block = mlirRewriterBaseGetInsertionBlock(base);
+    MlirOperation op = mlirRewriterBaseGetOperationAfterInsertion(base);
+
+    if (mlirOperationIsNull(op)) {
+      MlirOperation owner = mlirBlockGetParentOperation(block);
+      auto parent = PyOperation::forOperation(ctx, owner);
+      return PyInsertionPoint(PyBlock(parent, block));
+    }
+
+    return PyInsertionPoint(PyOperation::forOperation(ctx, op));
+  }
+
+  void replaceOp(MlirOperation op, MlirOperation newOp) {
+    mlirRewriterBaseReplaceOpWithOperation(base, op, newOp);
+  }
+
+  void replaceOp(MlirOperation op, const std::vector<MlirValue> &values) {
+    mlirRewriterBaseReplaceOpWithValues(base, op, values.size(), values.data());
+  }
+
+  void eraseOp(const PyOperation &op) { mlirRewriterBaseEraseOp(base, op); }
+
+private:
+  MlirRewriterBase base;
+  PyMlirContextRef ctx;
 };
 
 class PyConversionPatternRewriter : PyPatternRewriter {
@@ -485,8 +514,29 @@ void populateRewriteSubmodule(nb::module_ &m) {
   //----------------------------------------------------------------------------
   // Mapping of the PatternRewriter
   //----------------------------------------------------------------------------
-
-  PyPatternRewriter::bind(m);
+  nb::class_<PyPatternRewriter>(m, "PatternRewriter")
+      .def_prop_ro("ip", &PyPatternRewriter::getInsertionPoint,
+                   "The current insertion point of the PatternRewriter.")
+      .def(
+          "replace_op",
+          [](PyPatternRewriter &self, PyOperationBase &op,
+             PyOperationBase &newOp) {
+            self.replaceOp(op.getOperation(), newOp.getOperation());
+          },
+          "Replace an operation with a new operation.", nb::arg("op"),
+          nb::arg("new_op"))
+      .def(
+          "replace_op",
+          [](PyPatternRewriter &self, PyOperationBase &op,
+             const std::vector<PyValue> &values) {
+            std::vector<MlirValue> values_(values.size());
+            std::copy(values.begin(), values.end(), values_.begin());
+            self.replaceOp(op.getOperation(), values_);
+          },
+          "Replace an operation with a list of values.", nb::arg("op"),
+          nb::arg("values"))
+      .def("erase_op", &PyPatternRewriter::eraseOp, "Erase an operation.",
+           nb::arg("op"));
 
   //----------------------------------------------------------------------------
   // Mapping of the RewritePatternSet

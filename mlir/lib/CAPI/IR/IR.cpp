@@ -30,6 +30,7 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Parser/Parser.h"
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/Support/ThreadPool.h"
 
 #include <cstddef>
 #include <memory>
@@ -711,10 +712,6 @@ intptr_t mlirOperationGetNumOperands(MlirOperation op) {
 
 MlirValue mlirOperationGetOperand(MlirOperation op, intptr_t pos) {
   return wrap(unwrap(op)->getOperand(static_cast<unsigned>(pos)));
-}
-
-MlirOpOperand mlirOperationGetOpOperand(MlirOperation op, intptr_t pos) {
-  return wrap(&unwrap(op)->getOpOperand(static_cast<unsigned>(pos)));
 }
 
 void mlirOperationSetOperand(MlirOperation op, intptr_t pos,
